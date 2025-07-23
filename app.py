@@ -6,6 +6,9 @@ import os
 import base64
 from PIL import Image
 import io
+import smtplib
+from email.mime.text import MIMEText
+from datetime import datetime
 
 # ------------------ Config ------------------ #
 dotenv_path = Path(__file__).resolve().parent / ".env"
@@ -13,6 +16,13 @@ load_dotenv(dotenv_path)
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 st.set_page_config(page_title="Workbench AI", layout="wide")
+
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+if not os.getenv("OPENAI_API_KEY"):
+    st.error("⚠️ OpenAI API key not found. Please check your .env file.")
+    st.stop()
 
 # ------------------ Image Processing Helper ------------------ #
 def create_printable_html(project_data, project_name):
@@ -151,7 +161,16 @@ def create_printable_html(project_data, project_name):
                 color: #6c757d;
                 font-size: 14px;
             }}
+            .project-overview-minimal {{
+                margin: 20px 0;
+                padding: 0;
+            }}
             
+            .project-overview-minimal p {{
+                margin: 5px 0;
+                font-size: 16px;
+                line-height: 1.6;
+            }}
             @media screen {{
                 body {{ max-width: 800px; margin: 0 auto; }}
             }}
@@ -195,6 +214,27 @@ def create_printable_html(project_data, project_name):
     """
     return html_content
 
+# 2. MISSING compress_image FUNCTION - Add this function:
+def compress_image(image_bytes, max_size=(800, 800), quality=85):
+    """Compress image to reduce token usage"""
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # Convert to RGB if necessary
+        if image.mode in ('RGBA', 'LA', 'P'):
+            image = image.convert('RGB')
+        
+        # Resize if too large
+        image.thumbnail(max_size, Image.Resampling.LANCZOS)
+        
+        # Save as JPEG with compression
+        output = io.BytesIO()
+        image.save(output, format='JPEG', quality=quality, optimize=True)
+        return output.getvalue()
+    except Exception as e:
+        print(f"Error compressing image: {e}")
+        return image_bytes
+    
 def generate_project_plan(image_b64: str, tools: str, experience: str, question: str) -> str:
     """
     PURPOSE: Used in "Create Project" tab to generate initial comprehensive project plans
@@ -724,6 +764,7 @@ with tabs[create_tab_idx]:
                 st.session_state.project_history = []  # Fresh history for project chat
                 st.rerun()
 
+    
 # ---------- Dynamic Project Tab ---------- #
 if has_project_tab and project_tab_idx is not None:
     with tabs[project_tab_idx]:
@@ -1124,3 +1165,159 @@ with tabs[about_tab_idx]:
         <p><em>Built to help DIY enthusiasts tackle projects with confidence</em></p>
     </div>
     """, unsafe_allow_html=True)
+
+    # Add this CSS and feedback section at the very end of your app, after all tabs:
+
+# Add floating feedback button CSS
+st.markdown("""
+<style>
+.feedback-button {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 999;
+    background: #ff4b4b;
+    color: white;
+    border: none;
+    border-radius: 25px;
+    padding: 12px 20px;
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    transition: all 0.3s ease;
+}
+
+.feedback-button:hover {
+    background: #ff3333;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+}
+</style>
+""", unsafe_allow_html=True)
+
+# Email configuration for workbenchintel.com
+EMAIL_CONFIG = {
+    "smtp_server": "mail.privateemail.com",        # Namecheap Private Email SMTP
+    "smtp_port": 587,                              # TLS port
+    "email_address": os.getenv("FEEDBACK_EMAIL", "support@workbenchintel.com"),
+    "email_password": os.getenv("FEEDBACK_EMAIL_PASSWORD"),  # This comes from .env file
+    "recipient": os.getenv("FEEDBACK_EMAIL", "support@workbenchintel.com")
+}
+
+# Alternative configuration (if the above doesn't work)
+EMAIL_CONFIG_ALT = {
+    "smtp_server": "mail.workbenchintel.com",      # Domain-specific SMTP
+    "smtp_port": 587,
+    "email_address": os.getenv("FEEDBACK_EMAIL", "support@workbenchintel.com"),
+    "email_password": os.getenv("FEEDBACK_EMAIL_PASSWORD"),  # This comes from .env file
+    "recipient": os.getenv("FEEDBACK_EMAIL", "support@workbenchintel.com")
+}
+
+# Add error checking
+if not EMAIL_CONFIG["email_password"]:
+    st.error("Email configuration missing. Please check environment variables.")
+
+
+# Updated send function to handle SSL if needed:
+def send_feedback_email(experience, rating, suggestion, email):
+    """Send feedback via email - works with Namecheap"""
+    try:
+        # Create email content
+        subject = f"Workbench AI Feedback - {rating}"
+        body = f"""
+New feedback received from Workbench AI:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📝 What they used it for:
+{experience}
+
+⭐ Rating: {rating}
+
+💡 Suggestion:
+{suggestion}
+
+📧 User Email: {email if email else "Not provided"}
+
+🕒 Submitted: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+
+        # Create email message
+        msg = MIMEText(body)
+        msg['Subject'] = subject
+        msg['From'] = EMAIL_CONFIG["email_address"]
+        msg['To'] = EMAIL_CONFIG["recipient"]
+
+        # Try TLS first (port 587)
+        try:
+            with smtplib.SMTP(EMAIL_CONFIG["smtp_server"], EMAIL_CONFIG["smtp_port"]) as server:
+                server.starttls()
+                server.login(EMAIL_CONFIG["email_address"], EMAIL_CONFIG["email_password"])
+                server.send_message(msg)
+            return True, "Feedback sent successfully!"
+        
+        except Exception as tls_error:
+            # If TLS fails, try SSL (port 465)
+            try:
+                with smtplib.SMTP_SSL(EMAIL_CONFIG_ALT["smtp_server"], EMAIL_CONFIG_ALT["smtp_port"]) as server:
+                    server.login(EMAIL_CONFIG["email_address"], EMAIL_CONFIG["email_password"])
+                    server.send_message(msg)
+                return True, "Feedback sent successfully!"
+            
+            except Exception as ssl_error:
+                return False, f"TLS Error: {tls_error}, SSL Error: {ssl_error}"
+    
+    except Exception as e:
+        return False, f"Error sending feedback: {str(e)}"
+
+
+# Feedback section at the bottom of the app
+st.markdown("---")
+
+# Initialize feedback state
+if "show_feedback" not in st.session_state:
+    st.session_state.show_feedback = False
+
+# Feedback button
+col1, col2, col3 = st.columns([4, 1, 1])
+with col2:
+    if st.button("💬 Feedback", use_container_width=True, type="secondary"):
+        st.session_state.show_feedback = not st.session_state.show_feedback
+
+# Show feedback form when button is clicked
+if st.session_state.show_feedback:
+    st.markdown("### 💬 We'd Love Your Feedback!")
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        with st.form("feedback_form"):
+            experience = st.text_area("What did you use Workbench AI for?", height=80)
+            rating = st.radio("How was your experience?", ["👍 Great", "👎 Needs work"])
+            suggestion = st.text_area("Any ideas to improve it?", height=80)
+            email = st.text_input("Optional: leave your email if you'd like a reply")
+            
+            col_submit, col_cancel = st.columns([1, 1])
+            with col_submit:
+                submitted = st.form_submit_button("Submit Feedback", type="primary", use_container_width=True)
+            with col_cancel:
+                if st.form_submit_button("Cancel", use_container_width=True):
+                    st.session_state.show_feedback = False
+                    st.rerun()
+            
+# 5. FEEDBACK FORM - Replace the current feedback submission logic with:
+        if submitted:
+            if experience.strip() or suggestion.strip():  # Require at least one field
+                success, message = send_feedback_email(experience, rating, suggestion, email)
+                
+                if success:
+                    st.success("Thanks! Your feedback has been submitted.")
+                    st.balloons()
+                    st.session_state.show_feedback = False
+                else:
+                    st.error("Sorry, there was an error submitting your feedback. Please try again.")
+                    st.write(f"Error details: {message}")
+            else:
+                st.warning("Please share what you used Workbench AI for or provide a suggestion.")
